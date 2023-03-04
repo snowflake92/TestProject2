@@ -11,16 +11,22 @@
 #pragma config ICS = PGx2         //Changes programming pins from 8/9 to 2/3
 //Declare global variables
 float PWMfrequency = 4000;
+float PWMfslow = 8000;
 int TIMER_SECOND = 0;
+int STEPS2;
+int STEPS3;
 
 //Function prototypes
 void Timer1Setup();
 void HbridgeSetup();
-void LMcontrol (unsigned int direction, float dutyCycle);
-void RMcontrol (unsigned int direction, float dutyCycle);
+void LMcontrol (unsigned int direction, float speed);
+void RMcontrol (unsigned int direction, float speed);
 void DriveStraight();
+void StopRobot();
 void TurnLeft();
 void TurnRight();
+void __attribute__((interrupt, no_auto_psv)) _OC2Interrupt(void);    //This ISR is run every time PWM goes high
+void __attribute__((interrupt, no_auto_psv)) _OC3Interrupt(void);
 
 //Main
 int main(void) {
@@ -28,39 +34,70 @@ int main(void) {
 
     //Declare local variables
     enum {STOP, STRAIGHT, RIGHT, LEFT} driveState;
-
+    int n;
     //Setup
     Timer1Setup();
     HbridgeSetup();
 
 
     //Initialize state
-    driveState = STOP;
-    
+    driveState = STRAIGHT;
+    DriveStraight();
+    STEPS2 = 0;
+    STEPS3 = 0;
+    n = 0;
     TMR1 = 0;
+    
     while(1){
-        
-        if(TMR1 >= TIMER_SECOND && TMR1 <= TIMER_SECOND*3){
-            //DriveStraight();
-            OC2R = 0.5 * PWMfrequency;
-            OC3R = 0.5 * PWMfrequency;
 
-            _LATB13 = 1;    //Set IN1 high and IN2 low to go forward
-            _LATB14 = 0;
-            _LATA4 = 0;    //Set IN3 high and IN4 low to go forward
-            _LATB7 = 1;
+        switch(driveState)
+        {
+                case STOP:
+                   
+                    break;
+                case STRAIGHT:
+                    if(STEPS2 >= 1600 && STEPS3 >= 1600 && (n==1)){
+                        driveState = RIGHT;
+                        TurnRight();
+                        STEPS2 = 0;
+                        STEPS3 = 0;
+                        n = 2;
+                    }
+                    else if (STEPS2 >= 1600 && STEPS3 >= 1600 && (n==2)){
+                        driveState = STOP;
+                        StopRobot();
+                        STEPS2 = 0;
+                        STEPS3 = 0;
+                    }
+                    else if (STEPS2 >= 1600 && STEPS3 >= 1600 && (n==0)){
+                        driveState = LEFT;
+                        TurnLeft();
+                        STEPS2 = 0;
+                        STEPS3 = 0;
+                        n = 1;
+                    }
+
+                    
+                    break;
+            case LEFT:
+                if (STEPS2 >= 350 && STEPS3 >=350){
+                    driveState = STRAIGHT;
+                    DriveStraight();
+                    STEPS2 = 0;
+                    STEPS3 = 0;
+                }
+                break;
+            case RIGHT:
+                if (STEPS2 >= 700 && STEPS3 >= 700){
+                    driveState = STRAIGHT;
+                    DriveStraight();
+                    STEPS2 = 0;
+                    STEPS3 = 0;
+                    
+                }
         }
-//        else if(TMR1 > TIMER_SECOND*2 && TMR1 <= TIMER_SECOND *3){
-//            TurnLeft();
-//        }
-//        else if(TMR1 > TIMER_SECOND*3 && TMR1 <= TIMER_SECOND*5){
-//            DriveStraight();
-//        }
-//        else if(TMR1 > TIMER_SECOND*5 && TMR1 <= TIMER_SECOND*6){
-//            TurnRight();
-//        }
     }
-
+    
     return 0;
 }
 
@@ -92,23 +129,9 @@ void HbridgeSetup (){
     ANSA = 0;   //Digital
     ANSB = 0;
     TRISA = 0;  //Output
-    TRISB = 0;
-    
-//    _ANSA3 = 0;    //Digital       A3 = IN1(Left motor)
-//    _ANSB4 = 0;    //              B4 = IN2(Left motor)
-//    _ANSA4 = 0;    //              A4 = IN3(Right motor)
-//    _ANSB7 = 0;    //              B7 = IN4(Right motor)
-//    _TRISA3 = 0;   //Output
-//    _TRISB4 = 0;   //
-//    _TRISA4 = 0;   //
-//    _TRISB7 = 0;   //
+    TRISB = 0;   
 
-    //Setup H-bridge ENA/ENB pins (PWM pins 4 and 5)
-//    _ANSB0 = 0;     //Digital
-//    _ANSB1 = 0;     
-//    _TRISB0 = 0;    //Output
-//    _TRISB1 = 0;    
-
+    //Setup output compare 2 and 3
     OC2CON1 = 0;    //Clear pin 4   OC2 = Left motor
     OC2CON2 = 0;    //
     OC3CON1 = 0;    //Clear pin 5   OC3 = Right motor
@@ -125,63 +148,77 @@ void HbridgeSetup (){
 
     OC2CON2bits.SYNCSEL = 0b11111;   //Set sync source to OCX
     OC3CON2bits.SYNCSEL = 0b11111;
-
-    OC2RS = PWMfrequency;       //1000 Hz PWM Frequency
-    OC3RS = PWMfrequency;
+    
+    //Setup OC interrupts
+    _OC2IP = 4;     //Sets priority
+    _OC3IP = 5;
+    
+    _OC2IF = 0;     //reset flag to 0
+    _OC3IF = 0;
+    
+    _OC2IE = 1;     //enables interrupt
+    _OC3IE = 1;
 }
 
-void LMcontrol (unsigned int direction, float dutyCycle){
+void LMcontrol (unsigned int direction, float speed){
 //Pass this function a 1 to go forward or a 0 to go backward,
 //and a duty cycle (as a decimal) to control the left motor. 
 //This uses "Control method 2" as seen in the H-bridge 
 //PSC website specsheet
-    OC2R = PWMfrequency * dutyCycle;
-    if (direction = 1){
-        _LATA3 = 1;    //Set IN1 high and IN2 low to go forward
-        _LATB4 = 0;
-    }
-    else if (direction = 0){
-        _LATA3 = 0;    //Set IN1 low and IN2 high to go backward
-        _LATB4 = 1;
-    }
-    else{
-        OC2R = 0;       //Stop motor if incorrect value is passed
-    }
-    
+    _LATB7 = direction;
+    OC2RS = speed;
+    OC2R = speed*.5;
 }
 
-void RMcontrol (unsigned int direction, float dutyCycle){
+void RMcontrol (unsigned int direction, float speed){
 //Pass this function a 1 to go forward or a 0 to go backward,
 //and a duty cycle (as a decimal) to control the right motor. 
 //This uses "Control method 2" as seen in the H-bridge 
 //PSC website specsheet
     
-    OC3R = PWMfrequency * dutyCycle;
-    if (direction = 1){
-        _LATA4 = 1;    //Set IN3 high and IN4 low to go forward
-        _LATB7 = 0;
-    }
-    else if (direction = 0){
-        _LATA4 = 0;    //Set IN3 low and IN4 high to go backward
-        _LATB7 = 1;
-    }
-    else{
-        OC3R = 0;       //Stop motor if incorrect value is passed
-    }
-    
+    _LATB8 = direction;
+    OC3RS = speed;
+    OC3R = speed*.5;
 }
 
 void DriveStraight(){
-    LMcontrol(1,.5);
-    RMcontrol(1,.5);
+    LMcontrol(1,PWMfslow);
+    RMcontrol(1,PWMfslow);
+}
+
+void StopRobot(){
+    LMcontrol(1,0);
+    RMcontrol(1,0);
 }
 
 void TurnLeft(){
-    LMcontrol(1,.25);
-    RMcontrol(1,.5);       
+    LMcontrol(0,PWMfslow);
+    RMcontrol(1,PWMfslow);       
 }
 
 void TurnRight(){
-    LMcontrol(1,.5);
-    RMcontrol(1,.25);
+    LMcontrol(1,PWMfslow);
+    RMcontrol(0,PWMfslow);
+}
+
+// OC1 Interrupt Service Routine
+void __attribute__((interrupt, no_auto_psv)) _OC2Interrupt(void)    //This ISR is run every time PWM goes high
+{
+    // When the OC1 Interrupt is activated, the code will jump up here
+    // each time your PIC generates a PWM step
+    // Add code to increment the step count each time this function
+    // is called
+    _OC2IF = 0;
+    STEPS2++;
+}
+
+// OC1 Interrupt Service Routine
+void __attribute__((interrupt, no_auto_psv)) _OC3Interrupt(void)    //This ISR is run every time PWM goes high
+{
+    // When the OC1 Interrupt is activated, the code will jump up here
+    // each time your PIC generates a PWM step
+    // Add code to increment the step count each time this function
+    // is called
+    _OC3IF = 0;
+    STEPS3++;
 }
